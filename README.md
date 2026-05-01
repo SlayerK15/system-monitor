@@ -1,7 +1,8 @@
 # Performance Monitor
 
-A cross-platform system monitor with a clean, modern dashboard. Runs on
-**Windows 10/11**, **macOS**, and **any Linux distribution**.
+A cross-platform system monitor with a clean, modern dashboard. Runs as a
+**standalone native window** on **Windows 10/11**, **macOS**, and **any Linux
+distribution**.
 
 ![dashboard](docs/preview.png)
 
@@ -18,76 +19,83 @@ A cross-platform system monitor with a clean, modern dashboard. Runs on
 - **SMART status** — overall health, reallocated sectors, power-on hours, drive temperature
 - **Footer** — overall health, total uptime, lifetime data read / written, activity indicator
 
-Sensors that aren't available on your platform gracefully degrade to "—" rather
-than crashing the dashboard.
+Sensors that aren't available on your platform gracefully degrade to "—"
+rather than crashing the dashboard.
 
 ## Quick start
 
-### Linux / macOS
+This project uses [**uv**](https://docs.astral.sh/uv/) for dependency
+management. Install it once:
 
 ```bash
-./run.sh
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-### Windows
+Then launch the standalone window:
 
-```bat
+```bash
+# macOS / Linux
+./run.sh
+
+# Windows
 run.bat
 ```
 
-The script creates a virtual environment, installs dependencies, and opens the
-dashboard at <http://127.0.0.1:8765> in your browser.
+That's it — `uv` will create an isolated environment, install Flask,
+psutil, and pywebview, and open a native desktop window backed by the
+platform's native webview (Edge WebView2 on Windows, WKWebView on macOS,
+Qt WebEngine on Linux).
 
-### Manual install
+### Manual invocation
 
 ```bash
-python -m venv .venv
-# Linux/macOS:
-source .venv/bin/activate
-# Windows (PowerShell):
-.venv\Scripts\Activate.ps1
-
-pip install -r requirements.txt
-python app.py
+uv run system-monitor                 # standalone window (default)
+uv run system-monitor --browser       # open in your default browser
+uv run system-monitor --no-open       # headless: just run the HTTP server
+uv run system-monitor --host 0.0.0.0  # expose to LAN
+uv run system-monitor --port 8765     # pin to a specific port
 ```
 
-### Command-line options
+You can also run it as a module: `uv run python -m system_monitor`.
 
-```
-python app.py --host 127.0.0.1 --port 8765 --no-browser
+### Installing as a CLI
+
+```bash
+uv tool install .
+system-monitor
 ```
 
-| Option         | Default     | Description                                   |
-| -------------- | ----------- | --------------------------------------------- |
-| `--host`       | `127.0.0.1` | Bind address. Use `0.0.0.0` to expose on LAN. |
-| `--port`       | `8765`      | TCP port.                                     |
-| `--no-browser` | off         | Don't auto-open the browser.                  |
+This makes `system-monitor` available globally on your `PATH`.
 
 ## Optional integrations
 
-These are auto-detected. None are required.
+These are auto-detected at runtime. None are required to launch the app.
 
-| Feature                | How to enable                                                     |
-| ---------------------- | ----------------------------------------------------------------- |
-| GPU metrics (NVIDIA)   | Install the proprietary NVIDIA driver (`nvidia-smi` on `$PATH`).  |
-| SMART data             | Install `smartmontools` (`smartctl` on `$PATH`).                  |
-| RAM speed/slots (Linux)| `dmidecode` (run with sudo permissions if you want this populated). |
-| CPU temp (macOS)       | `brew install osx-cpu-temp`.                                       |
-| Wi-Fi SSID (Linux)     | `iwgetid` from `wireless-tools`.                                   |
+| Feature                  | How to enable                                                       |
+| ------------------------ | ------------------------------------------------------------------- |
+| GPU metrics (NVIDIA)     | Install the proprietary NVIDIA driver (`nvidia-smi` on `$PATH`).    |
+| SMART data               | Install `smartmontools` (`smartctl` on `$PATH`).                    |
+| RAM speed/slots (Linux)  | `dmidecode` (run with sudo permissions to populate).                |
+| CPU temp (macOS)         | `brew install osx-cpu-temp`.                                        |
+| Wi-Fi SSID (Linux)       | `iwgetid` from `wireless-tools`.                                    |
 
 ## Architecture
 
 ```
-app.py                      Flask entrypoint, --host/--port/--no-browser
+pyproject.toml              uv-managed deps + system-monitor CLI entry point
+system_monitor/server.py    Flask + pywebview launcher (native window)
 system_monitor/monitor.py   psutil-based collector with per-platform fallbacks
-static/index.html           Single-page dashboard
-static/style.css            Windows 11-inspired theme
-static/app.js               Polls /api/stats every 1.5s and renders SVG charts
+system_monitor/static/      Single-page dashboard (HTML/CSS/JS)
 ```
 
-The backend exposes a single JSON endpoint at `/api/stats` that returns a full
-snapshot. The front-end polls it every 1.5 seconds and updates DOM/SVG in
-place — no build step, no framework, no native dependencies.
+The native window hosts a tiny single-page app that polls a local
+`/api/stats` endpoint every 1.5 seconds and updates SVG gauges, history
+charts, and per-disk cards in place — no build step, no framework, no
+bundler.
 
 ## License
 
