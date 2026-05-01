@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Performance Monitor</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="window" id="app">
+    <header class="title-bar">
+      <div class="title-left">
+        <span class="app-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20">
+            <path d="M3 17h3l3-9 4 14 3-10 2 5h3" stroke="#2563eb" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <span class="title-text">Performance Monitor</span>
+      </div>
+    </header>
+
+    <section class="page-header">
+      <div>
+        <h1>System Overview</h1>
+        <p class="subtitle">Real-time hardware monitoring and performance metrics</p>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn" id="refresh-btn" title="Refresh">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
+        <button class="icon-btn" id="menu-btn" title="More">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+        </button>
+      </div>
+    </section>
+
+    <!-- Row 1: CPU & GPU -->
+    <section class="grid grid-2">
+      <article class="card" data-card="cpu">
+        <header class="card-header">
+          <div>
+            <h2>CPU</h2>
+            <p class="muted" id="cpu-model">Detecting…</p>
+          </div>
+        </header>
+        <div class="gauge-row">
+          <div class="gauge" id="cpu-gauge"></div>
+        </div>
+        <div class="stat-row">
+          <div class="stat"><div class="stat-value" id="cpu-clock">—</div><div class="stat-label">Clock Speed</div></div>
+          <div class="stat"><div class="stat-value" id="cpu-threads">—</div><div class="stat-label">Threads</div></div>
+          <div class="stat"><div class="stat-value" id="cpu-temp">—</div><div class="stat-label">Temperature</div></div>
+        </div>
+        <div class="chart" id="cpu-chart"></div>
+      </article>
+
+      <article class="card" data-card="gpu">
+        <header class="card-header">
+          <div>
+            <h2>GPU</h2>
+            <p class="muted" id="gpu-model">Detecting…</p>
+          </div>
+        </header>
+        <div class="gauge-row">
+          <div class="gauge gauge-green" id="gpu-gauge"></div>
+        </div>
+        <div class="stat-row">
+          <div class="stat"><div class="stat-value" id="gpu-clock">—</div><div class="stat-label">Clock Speed</div></div>
+          <div class="stat"><div class="stat-value" id="gpu-vram">—</div><div class="stat-label">VRAM Used</div></div>
+          <div class="stat"><div class="stat-value" id="gpu-temp">—</div><div class="stat-label">Temperature</div></div>
+        </div>
+        <div class="chart" id="gpu-chart"></div>
+      </article>
+    </section>
+
+    <!-- Row 2: RAM & Disks (rendered dynamically) -->
+    <section class="grid grid-3" id="storage-row">
+      <article class="card storage-card" data-card="ram">
+        <header class="row spread">
+          <div class="row gap">
+            <span class="badge purple">RAM</span>
+          </div>
+          <span class="value-large" id="ram-percent">—</span>
+        </header>
+        <p class="muted" id="ram-usage">— / —</p>
+        <div class="bar"><div class="bar-fill purple" id="ram-bar"></div></div>
+        <div class="stat-row small">
+          <div class="stat"><div class="stat-value" id="ram-speed">—</div><div class="stat-label">Speed</div></div>
+          <div class="stat"><div class="stat-value" id="ram-slots">—</div><div class="stat-label">Slots Used</div></div>
+          <div class="stat"><div class="stat-value" id="ram-committed">—</div><div class="stat-label">Committed</div></div>
+        </div>
+      </article>
+      <!-- Disk cards injected here -->
+    </section>
+
+    <!-- Row 3: Internet & Power -->
+    <section class="grid grid-2">
+      <article class="card" data-card="internet">
+        <header class="row spread">
+          <div class="row gap">
+            <span class="icon-circle blue">🌐</span>
+            <h3>Internet</h3>
+          </div>
+          <div class="text-right">
+            <div class="status-text" id="net-status">—</div>
+            <div class="muted small" id="net-conn-type">—</div>
+          </div>
+        </header>
+        <div class="net-stats">
+          <div class="net-stat">
+            <div class="row gap">
+              <span class="arrow down">↓</span>
+              <div>
+                <div class="muted small">Download</div>
+                <div class="value-medium" id="net-down">—</div>
+              </div>
+            </div>
+            <svg class="sparkline" id="net-down-spark" viewBox="0 0 200 40" preserveAspectRatio="none"></svg>
+          </div>
+          <div class="net-stat">
+            <div class="row gap">
+              <span class="arrow up">↑</span>
+              <div>
+                <div class="muted small">Upload</div>
+                <div class="value-medium" id="net-up">—</div>
+              </div>
+            </div>
+            <svg class="sparkline green" id="net-up-spark" viewBox="0 0 200 40" preserveAspectRatio="none"></svg>
+          </div>
+        </div>
+        <div class="stat-row small">
+          <div class="stat"><div class="stat-value" id="net-latency">—</div><div class="stat-label">Latency</div></div>
+          <div class="stat"><div class="stat-value mono" id="net-ip">—</div><div class="stat-label">IP Address</div></div>
+          <div class="stat"><div class="stat-value" id="net-signal">—</div><div class="stat-label">Signal Strength</div></div>
+        </div>
+      </article>
+
+      <article class="card" data-card="power">
+        <header class="row spread">
+          <div class="row gap">
+            <span class="icon-circle green">⚡</span>
+            <h3>Power</h3>
+          </div>
+          <div class="text-right">
+            <div class="status-text" id="power-source">—</div>
+            <div class="muted small" id="power-state">—</div>
+          </div>
+        </header>
+        <div class="row spread power-main">
+          <div>
+            <div class="value-xl" id="battery-percent">—</div>
+            <div class="muted small">Battery Level</div>
+          </div>
+          <div class="text-right">
+            <div class="muted small">Power Plan</div>
+            <div class="value-medium" id="power-plan">—</div>
+            <div class="muted small mt">Estimated Time</div>
+            <div class="value-medium" id="battery-time">—</div>
+          </div>
+        </div>
+        <div class="bar"><div class="bar-fill green" id="battery-bar"></div></div>
+        <div class="stat-row small">
+          <div class="stat"><div class="stat-value" id="power-voltage">—</div><div class="stat-label">Voltage</div></div>
+          <div class="stat"><div class="stat-value" id="power-current">—</div><div class="stat-label">Current</div></div>
+          <div class="stat"><div class="stat-value" id="power-watts">—</div><div class="stat-label">Power</div></div>
+        </div>
+      </article>
+    </section>
+
+    <!-- Row 4: Fan Speed & System Info -->
+    <section class="grid grid-2">
+      <article class="card" data-card="fans">
+        <header class="row gap">
+          <span class="icon-circle blue">❄</span>
+          <h3>Fan Speed</h3>
+        </header>
+        <div class="fans-row" id="fans-row">
+          <div class="muted">No fan sensors available</div>
+        </div>
+      </article>
+
+      <article class="card" data-card="system">
+        <header class="row gap">
+          <span class="icon-circle gray">🖥</span>
+          <h3>System Info</h3>
+        </header>
+        <dl class="kv">
+          <div><dt>System</dt><dd id="sys-os">—</dd></div>
+          <div><dt>Motherboard</dt><dd id="sys-board">—</dd></div>
+          <div><dt>Uptime</dt><dd id="sys-uptime">—</dd></div>
+          <div><dt>Last Updated</dt><dd id="sys-updated">—</dd></div>
+        </dl>
+      </article>
+    </section>
+
+    <!-- Row 5: SMART -->
+    <section class="grid">
+      <article class="card" data-card="smart">
+        <header class="row gap">
+          <span class="icon-circle gray">🛡</span>
+          <h3>SMART Status</h3>
+        </header>
+        <div class="smart-row" id="smart-row">
+          <div class="muted">SMART data unavailable (install smartmontools to enable)</div>
+        </div>
+      </article>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="row gap">
+        <span class="dot green"></span>
+        <div>
+          <div class="footer-title" id="footer-status">System Healthy</div>
+          <div class="muted small" id="footer-status-sub">All systems normal</div>
+        </div>
+      </div>
+      <div class="footer-stat"><div class="muted small">Total Uptime</div><div class="value-medium" id="footer-uptime">—</div></div>
+      <div class="footer-stat"><div class="muted small">Total Data Read</div><div class="value-medium" id="footer-read">—</div></div>
+      <div class="footer-stat"><div class="muted small">Total Data Written</div><div class="value-medium" id="footer-written">—</div></div>
+      <div class="row gap">
+        <div>
+          <div class="muted small text-right">Activity</div>
+          <div class="dots" id="footer-activity"></div>
+        </div>
+        <span class="icon-circle blue activity-icon">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        </span>
+      </div>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
