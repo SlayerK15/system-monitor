@@ -80,7 +80,8 @@ These are auto-detected at runtime. None are required to launch the app.
 | GPU metrics (NVIDIA)     | Install the proprietary NVIDIA driver (`nvidia-smi` on `$PATH`).    |
 | SMART data               | Install `smartmontools` (`smartctl` on `$PATH`).                    |
 | RAM speed/slots (Linux)  | `dmidecode` (run with sudo permissions to populate).                |
-| CPU temp (macOS)         | `brew install osx-cpu-temp`.                                        |
+| CPU temp (Intel Mac)     | `brew install osx-cpu-temp`.                                        |
+| CPU temp (Apple Silicon) | `brew install smctemp` (community tool, no sudo).                   |
 | Wi-Fi SSID (Linux)       | `iwgetid` from `wireless-tools`.                                    |
 
 ## Architecture

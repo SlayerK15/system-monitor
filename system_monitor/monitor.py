@@ -111,19 +111,31 @@ class SystemMonitor:
 
     def _cpu(self) -> dict[str, Any]:
         utilization = _safe(lambda: psutil.cpu_percent(interval=None), 0.0)
-        freq = _safe(psutil.cpu_freq)
-        clock_ghz = (freq.current / 1000.0) if freq and freq.current else None
         threads = _safe(lambda: psutil.cpu_count(logical=True))
         cores = _safe(lambda: psutil.cpu_count(logical=False))
-        temp = self._cpu_temperature()
         return {
             "model": self._cpu_model(),
             "utilization": utilization,
-            "clock_ghz": clock_ghz,
+            "clock_ghz": self._cpu_clock_ghz(),
             "threads": threads,
             "cores": cores,
-            "temperature_c": temp,
+            "temperature_c": self._cpu_temperature(),
         }
+
+    def _cpu_clock_ghz(self) -> float | None:
+        # psutil.cpu_freq returns 0 on Apple Silicon and sometimes a tiny
+        # bogus value, so filter anything below a sane CPU floor (100 MHz).
+        freq = _safe(lambda: psutil.cpu_freq())
+        if freq and freq.current and freq.current >= 100:
+            return freq.current / 1000.0
+        if IS_MAC:
+            # Intel Macs expose hw.cpufrequency in Hz; Apple Silicon returns 0.
+            out = _run(["sysctl", "-n", "hw.cpufrequency"])
+            if out and out.strip().isdigit():
+                hz = int(out.strip())
+                if hz > 0:
+                    return hz / 1e9
+        return None
 
     def _cpu_model(self) -> str:
         if IS_LINUX:
@@ -170,13 +182,18 @@ class SystemMonitor:
                 if "cpu" in label or "package" in label or "core" in label:
                     if e.current:
                         return round(e.current, 1)
-        # Mac: try osx-cpu-temp if installed.
         if IS_MAC:
-            out = _run(["osx-cpu-temp"])
-            if out:
+            # osx-cpu-temp works on Intel Macs.
+            # smctemp is a community tool that supports Apple Silicon.
+            for cmd in (["osx-cpu-temp"], ["smctemp", "-c"], ["smctemp"]):
+                out = _run(cmd)
+                if not out:
+                    continue
                 m = re.search(r"([\d.]+)", out)
                 if m:
-                    return round(float(m.group(1)), 1)
+                    t = float(m.group(1))
+                    if t > 1:  # 0.0 means the SMC key wasn't readable.
+                        return round(t, 1)
         # Windows has no built-in API; would require OpenHardwareMonitor.
         return None
 
@@ -228,26 +245,38 @@ class SystemMonitor:
     def _gpu_apple(self) -> dict[str, Any] | None:
         if not IS_MAC:
             return None
+        model = "Apple GPU"
         out = _run(["system_profiler", "-json", "SPDisplaysDataType"], timeout=5.0)
-        if not out:
-            return None
-        try:
-            data = json.loads(out)
-            displays = data.get("SPDisplaysDataType", [])
-            if not displays:
-                return None
-            d = displays[0]
-            return {
-                "model": d.get("sppci_model") or d.get("_name") or "Apple GPU",
-                "utilization": 0.0,  # not exposed by system_profiler
-                "clock_ghz": None,
-                "vram_used_gb": None,
-                "vram_total_gb": None,
-                "temperature_c": None,
-                "available": True,
-            }
-        except (json.JSONDecodeError, KeyError):
-            return None
+        if out:
+            try:
+                data = json.loads(out)
+                displays = data.get("SPDisplaysDataType", [])
+                if displays:
+                    d = displays[0]
+                    model = d.get("sppci_model") or d.get("_name") or "Apple GPU"
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        # ioreg exposes GPU utilization on Apple Silicon without sudo.
+        utilization = 0.0
+        ioreg_out = _run(
+            ["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
+            timeout=2.0,
+        )
+        if ioreg_out:
+            m = re.search(r'"Device Utilization %"\s*=\s*(\d+)', ioreg_out)
+            if m:
+                utilization = float(m.group(1))
+
+        return {
+            "model": model,
+            "utilization": utilization,
+            "clock_ghz": None,
+            "vram_used_gb": None,
+            "vram_total_gb": None,
+            "temperature_c": None,
+            "available": True,
+        }
 
     # ------------------------------------------------------------------
     # Memory
@@ -270,6 +299,12 @@ class SystemMonitor:
             out = _run(["sudo", "-n", "dmidecode", "-t", "memory"])
             if out:
                 m = re.search(r"Configured Memory Speed:\s*(\d+)\s*MT/s", out)
+                if m:
+                    return int(m.group(1))
+        if IS_MAC:
+            out = _run(["system_profiler", "SPMemoryDataType"], timeout=3.0)
+            if out:
+                m = re.search(r"Speed:\s*(\d+)\s*MHz", out)
                 if m:
                     return int(m.group(1))
         if IS_WINDOWS:
@@ -321,7 +356,7 @@ class SystemMonitor:
             usage = _safe(lambda p=part.mountpoint: psutil.disk_usage(p))
             if not usage:
                 continue
-            io_key = self._disk_io_key(part.device)
+            io_key = self._disk_io_key(part.device, per_disk.keys())
             cur = per_disk.get(io_key) if io_key else None
             prev = self._last_disk_io.get(io_key) if io_key else None
             read_speed = write_speed = None
@@ -350,12 +385,47 @@ class SystemMonitor:
         results.sort(key=lambda d: d["total_gb"], reverse=True)
         return results
 
-    def _disk_io_key(self, device: str) -> str | None:
-        # psutil keys disks by base device name without partition number.
+    def _disk_io_key(self, device: str, candidate_keys=()) -> str | None:
+        """Map a partition device path to its psutil disk_io_counters key.
+
+        psutil keys disks by physical-device name. Names differ widely
+        between platforms — Linux uses ``sda`` / ``nvme0n1``, macOS uses
+        ``disk0`` (APFS partitions show as ``disk3s1s1``), Windows uses
+        ``PhysicalDrive0``. Try a regex-derived candidate first, then
+        fall back to the longest perdisk key that prefixes the device
+        basename.
+        """
         if not device:
             return None
-        name = os.path.basename(device.rstrip("0123456789"))
-        return name or None
+        name = os.path.basename(device)
+        candidates = []
+        # macOS APFS: diskNsM[sK] -> diskN
+        m = re.match(r"^(disk\d+)", name)
+        if m:
+            candidates.append(m.group(1))
+        # Linux NVMe: nvme0n1p1 -> nvme0n1
+        m = re.match(r"^(nvme\d+n\d+)", name)
+        if m:
+            candidates.append(m.group(1))
+        # Linux mmc / md: mmcblk0p1 -> mmcblk0
+        m = re.match(r"^(mmcblk\d+|md\d+)", name)
+        if m:
+            candidates.append(m.group(1))
+        # Plain sda1 -> sda
+        m = re.match(r"^([a-zA-Z]+)\d*$", name)
+        if m:
+            candidates.append(m.group(1))
+        candidates.append(name)
+
+        keys = list(candidate_keys)
+        for c in candidates:
+            if c in keys:
+                return c
+        # Last-resort: pick the longest psutil key that the device name starts with.
+        prefixed = [k for k in keys if k and name.startswith(k)]
+        if prefixed:
+            return max(prefixed, key=len)
+        return candidates[0] if candidates else None
 
     def _disk_label(self, part) -> str:
         if IS_WINDOWS:
@@ -464,8 +534,14 @@ class SystemMonitor:
 
     def _ping_latency(self) -> float | None:
         if IS_WINDOWS:
+            # -w wait time (ms)
             cmd = ["ping", "-n", "1", "-w", "1000", "8.8.8.8"]
+        elif IS_MAC:
+            # macOS: -W is per-reply wait in MILLISECONDS (so -W 1 means 1ms,
+            # which always fails). Use -t for total timeout in seconds.
+            cmd = ["ping", "-c", "1", "-t", "1", "8.8.8.8"]
         else:
+            # Linux: -W is per-reply wait in seconds.
             cmd = ["ping", "-c", "1", "-W", "1", "8.8.8.8"]
         out = _run(cmd, timeout=2.0)
         if not out:
@@ -481,6 +557,14 @@ class SystemMonitor:
             if out and out.strip():
                 return out.strip()
         if IS_MAC:
+            # The legacy `airport` binary was removed in modern macOS, so try
+            # `networksetup` first which works on every supported release.
+            if iface:
+                out = _run(["networksetup", "-getairportnetwork", iface])
+                if out:
+                    m = re.search(r"Current Wi-Fi Network:\s*(.+)", out)
+                    if m:
+                        return m.group(1).strip()
             airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
             if os.path.exists(airport):
                 out = _run([airport, "-I"])
