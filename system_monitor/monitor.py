@@ -78,8 +78,100 @@ class SystemMonitor:
         self._session_start = time.time()
         self._session_initial_disk = _safe(psutil.disk_io_counters)
 
+        # Cache for Windows-specific dynamic metrics that are too slow to
+        # poll on every snapshot (each PowerShell launch costs ~300-500 ms).
+        self._win_disk_temps_cache: dict[str, float] = {}
+        self._win_disk_temps_at: float = 0.0
+
+        # One-shot collection of platform-static info (CPU model, motherboard,
+        # RAM speed/slots, battery design voltage, drive map, disk health).
+        # Avoids re-launching PowerShell every frame on Windows.
+        self._static = self._collect_static_info()
+
         # Prime cpu_percent so the first reading isn't 0.0.
         psutil.cpu_percent(interval=None)
+
+    # ------------------------------------------------------------------
+    # static info collection (run once, cached on the instance)
+
+    def _collect_static_info(self) -> dict[str, Any]:
+        info: dict[str, Any] = {}
+        if IS_WINDOWS:
+            self._collect_windows_static(info)
+        return info
+
+    def _collect_windows_static(self, info: dict[str, Any]) -> None:
+        # One PowerShell call gathers everything that doesn't change at
+        # runtime. Cuts per-snapshot overhead from ~5 PS launches to 0.
+        ps_script = (
+            "$ErrorActionPreference='SilentlyContinue';"
+            "$cpu=(Get-CimInstance Win32_Processor|Select-Object -First 1).Name;"
+            "$b=Get-CimInstance Win32_BaseBoard;"
+            "$mem=@(Get-CimInstance Win32_PhysicalMemory);"
+            "$arr=Get-CimInstance Win32_PhysicalMemoryArray|Select-Object -First 1;"
+            "$bat=Get-CimInstance Win32_Battery|Select-Object -First 1;"
+            "$parts=@(Get-Partition|Where-Object DriveLetter);"
+            "$disks=@(Get-PhysicalDisk);"
+            "$out=[ordered]@{"
+            "  cpu_model=$cpu;"
+            "  motherboard=if($b){\"$($b.Manufacturer) $($b.Product)\".Trim()}else{$null};"
+            "  memory_speed=if($mem.Count -gt 0){$mem[0].Speed}else{$null};"
+            "  memory_slots_used=$mem.Count;"
+            "  memory_slots_total=if($arr){$arr.MemoryDevices}else{$mem.Count};"
+            "  battery_voltage_mv=if($bat){$bat.DesignVoltage}else{0};"
+            "  drive_map=@($parts|ForEach-Object{@{letter=\"$($_.DriveLetter):\";drive=\"PhysicalDrive$($_.DiskNumber)\"}});"
+            "  disk_health=@($disks|ForEach-Object{@{device=\"PhysicalDrive$($_.DeviceId)\";status=$_.HealthStatus}})"
+            "};"
+            "$out|ConvertTo-Json -Depth 4 -Compress"
+        )
+        out = _run(["powershell", "-NoProfile", "-Command", ps_script], timeout=10.0)
+        if not out:
+            return
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return
+        info["cpu_model"] = data.get("cpu_model")
+        info["motherboard"] = data.get("motherboard")
+        speed = data.get("memory_speed")
+        if speed:
+            try:
+                info["memory_speed"] = int(speed)
+            except (TypeError, ValueError):
+                pass
+        used = data.get("memory_slots_used")
+        total = data.get("memory_slots_total")
+        if used:
+            try:
+                info["memory_slots"] = {
+                    "used": int(used),
+                    "total": int(total or used),
+                }
+            except (TypeError, ValueError):
+                pass
+        mv = data.get("battery_voltage_mv") or 0
+        try:
+            mv_int = int(mv)
+            if mv_int > 0:
+                info["battery_voltage"] = round(mv_int / 1000.0, 2)
+        except (TypeError, ValueError):
+            pass
+        drive_map: dict[str, str] = {}
+        for entry in data.get("drive_map") or []:
+            if isinstance(entry, dict):
+                letter = (entry.get("letter") or "").upper()
+                drive = entry.get("drive")
+                if letter and drive:
+                    drive_map[letter] = drive
+        info["windows_drive_map"] = drive_map
+        disk_health: dict[str, str] = {}
+        for entry in data.get("disk_health") or []:
+            if isinstance(entry, dict):
+                device = entry.get("device")
+                status = entry.get("status")
+                if device and status:
+                    disk_health[device] = status
+        info["windows_disk_health"] = disk_health
 
     # ------------------------------------------------------------------
     # public API
@@ -138,6 +230,8 @@ class SystemMonitor:
         return None
 
     def _cpu_model(self) -> str:
+        if IS_WINDOWS and self._static.get("cpu_model"):
+            return self._static["cpu_model"]
         if IS_LINUX:
             try:
                 with open("/proc/cpuinfo", "r", encoding="utf-8") as fh:
@@ -151,12 +245,7 @@ class SystemMonitor:
             if out:
                 return out.strip()
         if IS_WINDOWS:
-            out = _run(["wmic", "cpu", "get", "Name", "/value"])
-            if out:
-                for line in out.splitlines():
-                    if line.lower().startswith("name="):
-                        return line.split("=", 1)[1].strip()
-            # PowerShell fallback - wmic was deprecated on newer Windows.
+            # Static-info fast path was empty; fall back to a one-shot lookup.
             out = _run([
                 "powershell", "-NoProfile", "-Command",
                 "(Get-CimInstance Win32_Processor).Name",
@@ -194,7 +283,22 @@ class SystemMonitor:
                     t = float(m.group(1))
                     if t > 1:  # 0.0 means the SMC key wasn't readable.
                         return round(t, 1)
-        # Windows has no built-in API; would require OpenHardwareMonitor.
+        if IS_WINDOWS:
+            # ACPI thermal zones are the only built-in source; they often
+            # report motherboard rather than CPU package temp, and may
+            # require admin to access. Best-effort.
+            out = _run([
+                "powershell", "-NoProfile", "-Command",
+                "$t=Get-CimInstance -Namespace 'root/wmi' -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue;"
+                "if($t){(($t|Sort-Object CurrentTemperature -Descending|Select-Object -First 1).CurrentTemperature-2732)/10.0}",
+            ], timeout=3.0)
+            if out and out.strip():
+                try:
+                    t = float(out.strip())
+                    if 0 < t < 150:
+                        return round(t, 1)
+                except ValueError:
+                    pass
         return None
 
     # ------------------------------------------------------------------
@@ -295,6 +399,8 @@ class SystemMonitor:
         }
 
     def _memory_speed(self) -> int | None:
+        if IS_WINDOWS and self._static.get("memory_speed"):
+            return self._static["memory_speed"]
         if IS_LINUX:
             out = _run(["sudo", "-n", "dmidecode", "-t", "memory"])
             if out:
@@ -307,31 +413,11 @@ class SystemMonitor:
                 m = re.search(r"Speed:\s*(\d+)\s*MHz", out)
                 if m:
                     return int(m.group(1))
-        if IS_WINDOWS:
-            out = _run([
-                "powershell", "-NoProfile", "-Command",
-                "(Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1).Speed",
-            ])
-            if out:
-                m = re.search(r"\d+", out)
-                if m:
-                    return int(m.group(0))
         return None
 
     def _memory_slots(self) -> dict[str, int] | None:
         if IS_WINDOWS:
-            out = _run([
-                "powershell", "-NoProfile", "-Command",
-                "@(Get-CimInstance Win32_PhysicalMemory).Count",
-            ])
-            if out and out.strip().isdigit():
-                used = int(out.strip())
-                total_out = _run([
-                    "powershell", "-NoProfile", "-Command",
-                    "(Get-CimInstance Win32_PhysicalMemoryArray).MemoryDevices",
-                ])
-                total = int(total_out.strip()) if total_out and total_out.strip().isdigit() else used
-                return {"used": used, "total": total}
+            return self._static.get("memory_slots")
         return None
 
     # ------------------------------------------------------------------
@@ -396,6 +482,15 @@ class SystemMonitor:
         basename.
         """
         if not device:
+            return None
+        # Windows partitions are exposed as drive letters like "C:\\"; psutil
+        # keys disk I/O by "PhysicalDriveN", so we need a partition-table
+        # map. Cached at startup in self._static.
+        if IS_WINDOWS:
+            letter = device[:2].upper()
+            drive = self._static.get("windows_drive_map", {}).get(letter)
+            if drive:
+                return drive
             return None
         name = os.path.basename(device)
         candidates = []
@@ -463,21 +558,67 @@ class SystemMonitor:
                     temps = [e.current for e in entries if e.current]
                     if temps:
                         return round(max(temps), 1)
+        if IS_WINDOWS:
+            temps = self._windows_disk_temps()
+            letter = device[:2].upper()
+            drive = self._static.get("windows_drive_map", {}).get(letter)
+            if drive and drive in temps:
+                return temps[drive]
         return None
+
+    def _windows_disk_temps(self) -> dict[str, float]:
+        # Get-StorageReliabilityCounter is slow (~1-2s). Refresh at most every
+        # 30 seconds — drive temps don't change quickly anyway.
+        if not IS_WINDOWS:
+            return {}
+        now = time.monotonic()
+        if self._win_disk_temps_cache and now - self._win_disk_temps_at < 30:
+            return self._win_disk_temps_cache
+        out = _run([
+            "powershell", "-NoProfile", "-Command",
+            "$ErrorActionPreference='SilentlyContinue';"
+            "Get-PhysicalDisk|ForEach-Object{"
+            "  $r=$_|Get-StorageReliabilityCounter;"
+            "  if($r){\"PhysicalDrive$($_.DeviceId)=$($r.Temperature)\"}"
+            "}",
+        ], timeout=5.0)
+        result: dict[str, float] = {}
+        if out:
+            for line in out.splitlines():
+                line = line.strip()
+                if "=" not in line:
+                    continue
+                drive, value = line.split("=", 1)
+                value = value.strip()
+                if value and value.lstrip("-").isdigit():
+                    t = int(value)
+                    if 0 < t < 150:
+                        result[drive.strip()] = float(t)
+        self._win_disk_temps_cache = result
+        self._win_disk_temps_at = now
+        return result
 
     def _disk_health(self, device: str) -> str | None:
         out = _run(["smartctl", "-H", "-j", device], timeout=3.0)
-        if not out:
-            return None
-        try:
-            data = json.loads(out)
-            passed = data.get("smart_status", {}).get("passed")
-            if passed is True:
-                return "Good"
-            if passed is False:
-                return "Failing"
-        except (json.JSONDecodeError, KeyError):
-            pass
+        if out:
+            try:
+                data = json.loads(out)
+                passed = data.get("smart_status", {}).get("passed")
+                if passed is True:
+                    return "Good"
+                if passed is False:
+                    return "Failing"
+            except (json.JSONDecodeError, KeyError):
+                pass
+        if IS_WINDOWS:
+            letter = device[:2].upper()
+            drive = self._static.get("windows_drive_map", {}).get(letter)
+            if drive:
+                status = self._static.get("windows_disk_health", {}).get(drive)
+                if status == "Healthy":
+                    return "Good"
+                if status:
+                    return status
         return None
 
     # ------------------------------------------------------------------
@@ -675,6 +816,10 @@ class SystemMonitor:
                         return round(int(fh.read().strip()) / 1_000_000, 2)
                 except (OSError, ValueError):
                     continue
+        if IS_WINDOWS:
+            # Win32_Battery exposes design voltage (mV); live voltage isn't
+            # available without third-party drivers.
+            return self._static.get("battery_voltage")
         return None
 
     # ------------------------------------------------------------------
@@ -754,6 +899,9 @@ class SystemMonitor:
             except OSError:
                 pass
         if IS_WINDOWS:
+            cached = self._static.get("motherboard")
+            if cached:
+                return cached
             out = _run([
                 "powershell", "-NoProfile", "-Command",
                 "$b = Get-CimInstance Win32_BaseBoard; \"$($b.Manufacturer) $($b.Product)\"",

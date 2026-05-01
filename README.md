@@ -83,6 +83,7 @@ These are auto-detected at runtime. None are required to launch the app.
 | CPU temp (Intel Mac)     | `brew install osx-cpu-temp`.                                        |
 | CPU temp (Apple Silicon) | `brew install smctemp` (community tool, no sudo).                   |
 | Wi-Fi SSID (Linux)       | `iwgetid` from `wireless-tools`.                                    |
+| CPU temp (Windows)       | Best-effort via `MSAcpi_ThermalZoneTemperature` (often admin-only). For per-core CPU temp, run LibreHardwareMonitor / OpenHardwareMonitor as a service. |
 
 ## Architecture
 
