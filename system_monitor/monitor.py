@@ -154,7 +154,7 @@ class SystemMonitor:
         return platform.processor() or platform.machine() or "Unknown CPU"
 
     def _cpu_temperature(self) -> float | None:
-        sensors = _safe(psutil.sensors_temperatures, {}) or {}
+        sensors = _safe(lambda: psutil.sensors_temperatures(), {}) or {}
         # Look at the most reliable sources first.
         priority = ("coretemp", "k10temp", "cpu_thermal", "zenpower", "acpitz")
         for key in priority:
@@ -386,7 +386,7 @@ class SystemMonitor:
                 pass
         # Linux NVMe has thermal zone exposed via psutil.
         if IS_LINUX:
-            sensors = _safe(psutil.sensors_temperatures, {}) or {}
+            sensors = _safe(lambda: psutil.sensors_temperatures(), {}) or {}
             for key in ("nvme", "drivetemp"):
                 entries = sensors.get(key)
                 if entries:
@@ -535,7 +535,7 @@ class SystemMonitor:
     # Power
 
     def _power(self) -> dict[str, Any]:
-        battery = _safe(psutil.sensors_battery)
+        battery = _safe(lambda: psutil.sensors_battery())
         if not battery:
             return {
                 "has_battery": False,
@@ -597,7 +597,7 @@ class SystemMonitor:
     # Fans
 
     def _fans(self) -> list[dict[str, Any]]:
-        fans = _safe(psutil.sensors_fans, {}) or {}
+        fans = _safe(lambda: psutil.sensors_fans(), {}) or {}
         results = []
         max_rpm = 4000  # rough upper bound used to compute a percent visualization
         for chip, entries in fans.items():
